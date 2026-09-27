@@ -26,9 +26,54 @@ def build_general_kb(n, box_h, box_w, givens):
     -------
     PropKB
     """
-    raise NotImplementedError(
-        'build_general_kb: encode the puzzle as general clauses'
-    )
+    kb = PropKB()
+
+    # 1. Every cell has at least one value.
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            candidates = [
+                atom('Is', r, c, v)
+                for v in range(1, n + 1)
+            ]
+            kb.tell(associate('|', candidates))
+
+    # 2. Every cell has at most one value.
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            for v1 in range(1, n + 1):
+                for v2 in range(v1 + 1, n + 1):
+                    kb.tell(
+                        ~atom('Is', r, c, v1) | ~atom('Is', r, c, v2)
+                    )
+
+    # 3–5. Cells sharing a row, column, or box cannot contain the same value.
+    cells = [
+        (r, c)
+        for r in range(1, n + 1)
+        for c in range(1, n + 1)
+    ]
+
+    for i, (r1, c1) in enumerate(cells):
+        for r2, c2 in cells[i + 1:]:
+            same_row = r1 == r2
+            same_col = c1 == c2
+            same_box = (
+                (r1 - 1) // box_h == (r2 - 1) // box_h
+                and
+                (c1 - 1) // box_w == (c2 - 1) // box_w
+            )
+
+            if same_row or same_col or same_box:
+                for v in range(1, n + 1):
+                    kb.tell(
+                        ~atom('Is', r1, c1, v) | ~atom('Is', r2, c2, v)
+                    )
+
+    # 6. Add the given values as facts.
+    for (r, c), v in givens.items():
+        kb.tell(atom('Is', r, c, v))
+
+    return kb
 
 
 def build_definite_kb(n, box_h, box_w, givens):
@@ -44,9 +89,85 @@ def build_definite_kb(n, box_h, box_w, givens):
     -------
     PropDefiniteKB
     """
-    raise NotImplementedError(
-        'build_definite_kb: encode the puzzle as definite clauses'
-    )
+    dkb = PropDefiniteKB()
+
+    # 1. Infer the last candidate after all other values are excluded.
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            for v in range(1, n + 1):
+                premises = [
+                    atom('Not', r, c, other_v)
+                    for other_v in range(1, n + 1)
+                    if other_v != v
+                ]
+
+                dkb.tell(
+                    Expr(
+                        '==>',
+                        associate('&', premises),
+                        atom('Is', r, c, v),
+                    )
+                )
+
+    # 2. A known value excludes all other values in the same cell.
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            for v in range(1, n + 1):
+                conclusions = [
+                    atom('Not', r, c, other_v)
+                    for other_v in range(1, n + 1)
+                    if other_v != v
+                ]
+
+                for conclusion in conclusions:
+                    dkb.tell(
+                        Expr(
+                            '==>',
+                            atom('Is', r, c, v),
+                            conclusion,
+                        )
+                    )
+
+    # 3–5. Cells sharing a row, column, or box cannot contain the same value.
+    cells = [
+        (r, c)
+        for r in range(1, n + 1)
+        for c in range(1, n + 1)
+    ]
+
+    for i, (r1, c1) in enumerate(cells):
+        for r2, c2 in cells[i + 1:]:
+            same_row = r1 == r2
+            same_col = c1 == c2
+            same_box = (
+                (r1 - 1) // box_h == (r2 - 1) // box_h
+                and
+                (c1 - 1) // box_w == (c2 - 1) // box_w
+            )
+
+            if same_row or same_col or same_box:
+                for v in range(1, n + 1):
+                    dkb.tell(
+                        Expr(
+                            '==>',
+                            atom('Is', r1, c1, v),
+                            atom('Not', r2, c2, v),
+                        )
+                    )
+
+                    dkb.tell(
+                        Expr(
+                            '==>',
+                            atom('Is', r2, c2, v),
+                            atom('Not', r1, c1, v),
+                        )
+                    )
+
+    # 6. Add the given values as facts.
+    for (r, c), v in givens.items():
+        dkb.tell(atom('Is', r, c, v))
+
+    return dkb
 
 
 def solve_full_grid_fc(n, box_h, box_w, givens):
