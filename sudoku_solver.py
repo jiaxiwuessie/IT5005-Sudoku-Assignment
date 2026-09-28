@@ -177,9 +177,92 @@ def solve_full_grid_fc(n, box_h, box_w, givens):
     -------
     dict[(int, int), int] -- {(row, col): value} for every cell
     """
-    raise NotImplementedError(
-        'solve_full_grid_fc: solve every cell with forward chaining'
-    )
+    kb = _ObservedFCKB(build_definite_kb(n, box_h, box_w, givens))
+    # This fresh symbol has no fact or producing rule. The supplied algorithm
+    # therefore exhausts its agenda, exposing the whole least fixed point.
+    pl_fc_entails(kb, Expr('FCClosureComplete'))
+    solved = {}
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            values = [v for v in range(1, n + 1)
+                      if atom('Is', r, c, v) in kb.processed]
+            if len(values) != 1:
+                raise ValueError(
+                    f'Forward chaining found {len(values)} values for cell '
+                    f'({r}, {c}); expected exactly one. The Horn rules may '
+                    'be insufficient, or the givens may be inconsistent.'
+                )
+            solved[(r, c)] = values[0]
+    return solved
+
+
+class _ObservedFCKB(PropDefiniteKB):
+    """Index premise lookups and observe the unmodified library FC algorithm.
+
+    One adapter is used for exactly one inference call. No changes are made to
+    the source KB or support files. The optional trace counters only observe
+    rule firings; pl_fc_entails remains responsible for inference and agenda.
+    """
+
+    def __init__(self, source, record_trace=False):
+        self.clauses = list(source.clauses)
+        self.processed = set()
+        self.trace = []
+        self._by_premise = {}
+        self._remaining = {}
+        self._premises = {}
+        self._record_trace = record_trace
+        self._recorded = set()
+        # Facts are available before any deduction, regardless of agenda order.
+        for clause in self.clauses:
+            premises, conclusion = parse_definite_clause(clause)
+            if premises:
+                for premise in set(premises):
+                    self._by_premise.setdefault(premise, []).append(clause)
+                if record_trace:
+                    self._remaining[clause] = len(premises)
+                    self._premises[clause] = premises
+            elif record_trace and conclusion not in self._recorded:
+                self._recorded.add(conclusion)
+                self.trace.append({'premises': [], 'conclusion': conclusion,
+                                   'rule': None})
+
+    def clauses_with_premise(self, proposition):
+        # The library calls this once when it first processes an agenda fact.
+        self.processed.add(proposition)
+        rules = self._by_premise.get(proposition, [])
+        if self._record_trace:
+            for rule in rules:
+                self._remaining[rule] -= 1
+                conclusion = rule.args[1]
+                if self._remaining[rule] == 0 and conclusion not in self._recorded:
+                    self._recorded.add(conclusion)
+                    self.trace.append({'premises': list(self._premises[rule]),
+                                       'conclusion': conclusion, 'rule': rule})
+        return rules
+
+
+def trace_fc_query(kb, query):
+    """Return (entailed, proof_steps) for D's tutor UI using library FC.
+
+    Each step contains Expr-valued premises, conclusion, and the actual rule
+    (None for a given). Successful queries return only their proof ancestors,
+    in derivation order; an unproved query returns an empty proof, not a proof
+    of its negation. The caller formats these records for the interface.
+    """
+    observed = _ObservedFCKB(kb, record_trace=True)
+    result = pl_fc_entails(observed, query)
+    if not result:
+        return False, []
+    by_conclusion = {step['conclusion']: step for step in observed.trace}
+    needed, agenda = set(), [query]
+    while agenda:
+        conclusion = agenda.pop()
+        if conclusion not in needed:
+            needed.add(conclusion)
+            agenda.extend(by_conclusion[conclusion]['premises'])
+    return True, [step for step in observed.trace
+                  if step['conclusion'] in needed]
 
 
 def pl_bc_entails(kb, query):
