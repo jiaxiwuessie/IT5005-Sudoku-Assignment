@@ -9,7 +9,6 @@ from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import sudoku_app as app
 from sudoku_solver import atom, build_definite_kb, trace_fc_query
 
 
@@ -86,30 +85,34 @@ class AppWorkflowTests(unittest.TestCase):
 
 
 class PresentationTests(unittest.TestCase):
-    def test_loader_and_validation_never_need_reference_solutions(self):
-        n, bh, bw, puzzles = app.load_puzzles(ROOT / 'puzzles.json')
-        self.assertEqual([len(p) for p in puzzles], [30, 33, 36, 39, 42])
-        self.assertFalse(app.valid_grid(puzzles[0], n, bh, bw, puzzles[0]))
-        raw = json.loads((ROOT / 'puzzles.json').read_text())
-        solution = {tuple(map(int, k.split('_'))): v for k, v in raw['puzzles'][0]['solution'].items()}
-        self.assertTrue(app.valid_grid(solution, n, bh, bw, puzzles[0]))
-        solution[(1, 1)] = solution[(1, 2)]
-        self.assertFalse(app.valid_grid(solution, n, bh, bw, puzzles[0]))
+    def test_solver_never_needs_reference_solutions(self):
+        raw_pool = json.loads((ROOT / 'puzzles.json').read_text())
+        expected = {tuple(map(int, k.split('_'))): v
+                    for k, v in raw_pool['puzzles'][0]['solution'].items()}
+        for puzzle in raw_pool['puzzles']:
+            puzzle.pop('solution')
+        with patch('json.load', return_value=raw_pool):
+            at = AppTest.from_file(str(ROOT / 'sudoku_app.py'), default_timeout=30).run()
+            next(b for b in at.button if b.label == 'Solve puzzle').click().run()
+            self.assertEqual(len(at.exception), 0)
+            self.assertEqual(at.session_state['solve_result']['grid'], expected)
 
-    def test_trace_transcript_is_actual_proof_and_board_accessible(self):
-        n, bh, bw, puzzles = app.load_puzzles(ROOT / 'puzzles.json')
-        verdict, steps = trace_fc_query(build_definite_kb(n, bh, bw, puzzles[0]), atom('Is', 1, 1, 1))
-        self.assertTrue(verdict)
-        text = app.proof_text(steps, bh, bw)
-        self.assertIn('R1C1 is 1', text)
-        self.assertIn('Last candidate', text)
-        for kind in ['Given', 'Row exclusion', 'Column exclusion', 'Box exclusion']:
-            self.assertIn(kind, text)
-        html = app.board_html(n, bh, bw, puzzles[0])
+    def test_readable_proof_and_accessible_board(self):
+        at = AppTest.from_file(str(ROOT / 'sudoku_app.py'), default_timeout=30).run()
+        self.assertEqual(at.title[0].value, 'Sudoku Solver')
+        html = next(m.value for m in at.markdown if '<table ' in m.value)
         self.assertEqual(html.count('<td '), 81)
         self.assertIn('aria-label="Row 1, column 2: 3, given"', html)
         self.assertIn('box-bottom', html)
         self.assertIn('box-right', html)
+        next(b for b in at.button if b.label == 'Check entailment').click().run()
+        self.assertEqual(len(at.exception), 0)
+        self.assertTrue(at.session_state['query_result']['verdict'])
+        labels = [e.label for e in at.expander]
+        for kind in ['Given', 'Row exclusion', 'Column exclusion', 'Box exclusion', 'Last candidate']:
+            self.assertTrue(any(kind in label for label in labels), kind)
+        self.assertTrue(any('Premise: R1C1 cannot be 2' in m.value for m in at.markdown))
+        self.assertTrue(any('Conclusion: R1C1 is 1' in m.value for m in at.markdown))
 
 
 if __name__ == '__main__':
