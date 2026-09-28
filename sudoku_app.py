@@ -1,21 +1,19 @@
-"""Interactive Sudoku tutor. All deduction is delegated to sudoku_solver."""
 import json
-from html import escape
-from pathlib import Path
-from time import perf_counter
+import time
 import streamlit as st
+from utils import *
+from logic_ import *
 from sudoku_solver import (
-    atom, build_definite_kb, build_general_kb, solve_full_grid_fc,
-    solve_full_grid_bc, pl_bc_entails, trace_fc_query,
+    atom,
+    build_definite_kb,
+    build_general_kb,
+    solve_full_grid_fc,
+    solve_full_grid_bc,
+    pl_bc_entails,
 )
 
-
-def load_puzzles(path):
-    """Expose only givens to the app; reference solutions are never retained."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
-    puzzles = [{tuple(map(int, key.split("_"))): value
-                for key, value in p["givens"].items()} for p in raw["puzzles"]]
-    return raw["n"], raw["box_h"], raw["box_w"], puzzles
+from html import escape
+from sudoku_solver import trace_fc_query
 
 
 def parse_atom(proposition):
@@ -85,7 +83,7 @@ def board_html(n, box_h, box_w, givens, values=None, focus=None,
             if r % box_h == 0 and r < n: classes.append("box-bottom")
             if cell in premises: classes.append("premise")
             if cell == focus: classes.append("focus-cell")
-            body = str(value) if value is not None else "&middot;"
+            body = str(value) if value is not None else ""
             state = "given" if cell in givens else "deduced" if value else "empty"
             desc = f"Row {r}, column {c}: {value or 'empty'}, {state}"
             if cell == focus and eliminated is not None:
@@ -188,118 +186,150 @@ def render_proof(result, n, box_h, box_w, givens):
         with st.container(height=320):
             for i, item in enumerate(steps, 1):
                 kind, explanation = explain_step(item, box_h, box_w)
-                st.markdown(f"**{i}. {kind}** — {explanation}")
+                with st.expander(f"Step {i}: {kind} — {describe_atom(item['conclusion'])}"):
+                    st.write(explanation)
+                    for premise in item["premises"]:
+                        st.write("Premise: " + describe_atom(premise))
+                    if not item["premises"]:
+                        st.write("Premise: supplied puzzle fact.")
+                    st.write("Conclusion: " + describe_atom(item["conclusion"]))
     st.download_button("Download proof", proof_text(steps, box_h, box_w),
                        file_name=f"puzzle_{result['puzzle'] + 1}_proof_{query_key}.txt", mime="text/plain")
 
 
-def main():
-    st.set_page_config(page_title="Sudoku Logic Lab", page_icon="🧩", layout="wide")
-    st.markdown(CSS, unsafe_allow_html=True)
+st.set_page_config(page_title='Sudoku Solver', layout='wide')
+st.markdown(CSS, unsafe_allow_html=True)
+st.title('Sudoku Solver')
+
+with open('puzzles.json') as f:
+    pool = json.load(f)
+
+# --- 1. Puzzle selection & visual board display ---
+# TODO: a dropdown/selectbox to pick a puzzle by index from pool['puzzles'].
+# TODO: render the grid (e.g. a table or grid of st.columns), showing given
+# cells and empty cells differently (e.g. bold givens, blank otherwise).
+
+n, box_h, box_w = pool['n'], pool['box_h'], pool['box_w']
+selected = st.selectbox(
+    'Choose a puzzle', range(len(pool['puzzles'])),
+    format_func=lambda i: f"Puzzle {i + 1} · {len(pool['puzzles'][i]['givens'])} givens",
+    key='puzzle_selection',
+)
+givens = {tuple(map(int, key.split('_'))): value
+          for key, value in pool['puzzles'][selected]['givens'].items()}
+if st.session_state.get('active_puzzle') != selected:
+    for key in ('solve_result', 'query_result'):
+        st.session_state.pop(key, None)
+    st.session_state['active_puzzle'] = selected
+if st.button('Reset this puzzle'):
+    for key in ('solve_result', 'query_result'):
+        st.session_state.pop(key, None)
+st.caption(f'{n} × {n} board · {box_h} × {box_w} boxes · {len(givens)} givens')
+st.markdown(board_html(n, box_h, box_w, givens), unsafe_allow_html=True)
+st.caption('Starting grid: bold numbers on gray are givens; blank cells are unknown.')
+
+# --- 2. Full-grid auto-solver, with algorithm selection ---
+# TODO: a radio/selectbox letting the user choose forward chaining
+# (solve_full_grid_fc) or backward chaining (solve_full_grid_bc).
+# TODO: a button that times and calls the chosen solver on
+# (n, box_h, box_w, givens), then displays the solved grid and the elapsed
+# time.
+
+st.subheader('Solve the whole board')
+algorithm = st.radio('Inference algorithm', ['Forward chaining', 'Backward chaining'],
+                     horizontal=True, key='algorithm')
+if st.button('Solve puzzle', type='primary'):
+    st.session_state.pop('solve_result', None)
     try:
-        n, box_h, box_w, puzzles = load_puzzles(Path(__file__).with_name("puzzles.json"))
-    except (OSError, ValueError, KeyError) as error:
-        st.error(f"Could not load the puzzle pool: {error}")
-        st.stop()
-    with st.sidebar:
-        st.markdown("### Puzzle library")
-        selected = st.selectbox("Choose a puzzle", range(len(puzzles)),
-                                format_func=lambda i: f"Puzzle {i + 1} · {len(puzzles[i])} givens", key="puzzle_selection")
-        givens = puzzles[selected]
-        st.caption(f"{n} × {n} board · {box_h} × {box_w} boxes")
-        st.metric("Starting clues", len(givens))
-        st.caption(f"{n * n - len(givens)} cells to deduce")
-        if st.button("Reset this puzzle", use_container_width=True):
-            for key in ("solve_result", "query_result"): st.session_state.pop(key, None)
-        st.divider()
-        st.markdown("**How to explore**")
-        st.write("1. Pick a puzzle.\n2. Choose an algorithm and solve.\n3. Ask about a cell.\n4. Follow the evidence step by step.")
-        with st.expander("About the algorithms"):
-            st.write("Forward chaining starts from known facts and fires rules. Backward chaining starts "
-                     "from a target and tries to prove the premises of rules that support it.")
-            st.write("Both use the same elimination and last-candidate rules. These rules need not solve every possible Sudoku.")
-        st.caption("IT5005 · Knowledge representation & inference")
-    if st.session_state.get("active_puzzle") != selected:
-        for key in ("solve_result", "query_result"): st.session_state.pop(key, None)
-        st.session_state["active_puzzle"] = selected
-    st.markdown('<div class="eyebrow">IT5005 / INTERACTIVE LOGIC TUTOR</div>', unsafe_allow_html=True)
-    st.title("Sudoku Logic Lab")
-    st.markdown('<div class="intro">From a given number to a justified conclusion. Solve a puzzle, '
-                'ask a precise question, and see the rules behind the answer.</div>', unsafe_allow_html=True)
-    board_column, control_column = st.columns([1.1, 1], gap="large")
-    with control_column:
-        st.subheader("Solve the whole board")
-        algorithm = st.radio("Inference algorithm", ["Forward chaining", "Backward chaining"], horizontal=True, key="algorithm")
-        if st.button("Solve puzzle", type="primary", use_container_width=True):
-            st.session_state.pop("solve_result", None)
-            try:
-                with st.spinner(f"Solving with {algorithm.lower()}…"):
-                    started = perf_counter()
-                    solver = solve_full_grid_fc if algorithm == "Forward chaining" else solve_full_grid_bc
-                    solved = solver(n, box_h, box_w, givens)
-                    elapsed = perf_counter() - started
-                    if not valid_grid(solved, n, box_h, box_w, givens):
-                        raise ValueError("The returned grid does not satisfy the Sudoku constraints.")
-                st.session_state["solve_result"] = {"grid": solved, "seconds": elapsed, "algorithm": algorithm, "puzzle": selected}
-            except (ValueError, RecursionError) as error:
-                st.error(f"Could not complete this puzzle: {error}")
-        solved_result = st.session_state.get("solve_result")
-        if solved_result:
-            st.success(f"Solved with {solved_result['algorithm'].lower()} · {solved_result['seconds']:.3f} s")
-            st.caption("Time includes a fresh knowledge base, indexing, inference and grid reconstruction. "
-                       "Validation and rendering are excluded. Each click runs again.")
-        st.divider()
-        st.subheader("Ask about a cell")
-        st.caption("Is this value logically implied by the puzzle? Rows and columns start at 1.")
-        with st.form("cell_query"):
-            a, b, c = st.columns(3)
-            row = a.number_input("Row", min_value=1, max_value=n, value=1, step=1, key="query_row")
-            col = b.number_input("Column", min_value=1, max_value=n, value=1, step=1, key="query_col")
-            value = c.number_input("Value", min_value=1, max_value=n, value=1, step=1, key="query_value")
-            submitted = st.form_submit_button("Check entailment", use_container_width=True)
-        if submitted:
-            st.session_state.pop("query_result", None)
-            try:
-                with st.spinner("Checking the query and collecting its supporting proof…"):
-                    kb = build_definite_kb(n, box_h, box_w, givens)
-                    query = atom("Is", row, col, value)
-                    started = perf_counter()
-                    verdict = pl_bc_entails(kb, query)
-                    query_seconds = perf_counter() - started
-                    fc_verdict, steps = trace_fc_query(kb, query)
-                    if verdict != fc_verdict:
-                        raise ValueError("The two inference engines disagree; no proof is displayed.")
-                run = st.session_state.get("query_run", 0) + 1
-                st.session_state["query_run"] = run
-                st.session_state["query_result"] = {"verdict": bool(verdict), "steps": steps,
-                    "query": (row, col, value), "seconds": query_seconds, "puzzle": selected, "run": run}
-            except (ValueError, RecursionError) as error:
-                st.error(f"Could not answer this query: {error}")
-        result = st.session_state.get("query_result")
-        if result:
-            r, c, v = result["query"]
-            label = f"{'True' if result['verdict'] else 'False'} · Is R{r}C{c} = {v}?"
-            if result["verdict"]:
-                st.success(label)
-                st.caption("The knowledge base entails this value. Explore its proof below.")
-            else:
-                st.info(label)
-                st.caption("This value was not proved by the knowledge base. False is not, by itself, "
-                           "a proof of the opposite. There is no successful proof to replay.")
-            st.caption(f"Backward-chaining query: {result['seconds']:.3f} s "
-                       "(includes BC indexing; excludes knowledge-base construction and FC explanation).")
-    with board_column:
-        solved_result = st.session_state.get("solve_result")
-        st.subheader(f"Puzzle {selected + 1}" + (" · solved" if solved_result else " · starting grid"))
-        query_result = st.session_state.get("query_result")
-        focus = query_result["query"][:2] if query_result else None
-        st.markdown(board_html(n, box_h, box_w, givens, solved_result["grid"] if solved_result else None, focus), unsafe_allow_html=True)
-        st.markdown('<div class="legend">Bold on gray: givens · Green: deduced · Gold: queried cell</div>', unsafe_allow_html=True)
-        st.caption("All rows, columns and boxes validated. Initial clues are preserved." if solved_result
-                   else "Every answer is derived from the initial clues and the encoded rules.")
-    result = st.session_state.get("query_result")
-    if result and result["verdict"]: render_proof(result, n, box_h, box_w, givens)
+        with st.spinner(f'Solving with {algorithm.lower()}…'):
+            started = time.perf_counter()
+            solver = solve_full_grid_fc if algorithm == 'Forward chaining' else solve_full_grid_bc
+            solved = solver(n, box_h, box_w, givens)
+            elapsed = time.perf_counter() - started
+            if not valid_grid(solved, n, box_h, box_w, givens):
+                raise ValueError('The returned grid does not satisfy the Sudoku constraints.')
+        st.session_state['solve_result'] = {
+            'grid': solved, 'seconds': elapsed, 'algorithm': algorithm, 'puzzle': selected,
+        }
+    except (ValueError, RecursionError) as error:
+        st.error(f'Could not complete this puzzle: {error}')
+solved_result = st.session_state.get('solve_result')
+if solved_result:
+    st.success(f"Solved with {solved_result['algorithm'].lower()} · {solved_result['seconds']:.3f} s")
+    st.markdown(board_html(n, box_h, box_w, givens, solved_result['grid'],
+                           label='Solved Sudoku board'), unsafe_allow_html=True)
+    st.caption('Gray bold numbers are givens; green numbers are deduced. '
+               'All rows, columns and boxes validated; initial clues preserved.')
+    st.caption('Time includes a fresh knowledge base, indexing, inference and grid reconstruction. '
+               'Validation and rendering are excluded. Each click runs again.')
 
+# --- 3. Targeted cell entailment query ---
+# TODO: number inputs for row (r), column (c), value (v).
+# TODO: a button that builds the definite KB, calls
+# pl_bc_entails(kb, atom('Is', r, c, v)), and displays True/False.
 
-if __name__ == "__main__":
-    main()
+st.subheader('Ask about a cell')
+st.caption('Rows, columns and values start at 1.')
+with st.form('cell_query'):
+    row_column, column_column, value_column = st.columns(3)
+    r = row_column.number_input('Row', min_value=1, max_value=n, value=1, step=1, key='query_row')
+    c = column_column.number_input('Column', min_value=1, max_value=n, value=1, step=1, key='query_col')
+    v = value_column.number_input('Value', min_value=1, max_value=n, value=1, step=1, key='query_value')
+    submitted = st.form_submit_button('Check entailment')
+if submitted:
+    st.session_state.pop('query_result', None)
+    try:
+        with st.spinner('Checking the query…'):
+            kb = build_definite_kb(n, box_h, box_w, givens)
+            started = time.perf_counter()
+            verdict = pl_bc_entails(kb, atom('Is', r, c, v))
+            query_seconds = time.perf_counter() - started
+        run = st.session_state.get('query_run', 0) + 1
+        st.session_state['query_run'] = run
+        st.session_state['query_result'] = {
+            'verdict': bool(verdict), 'query': (r, c, v),
+            'seconds': query_seconds, 'puzzle': selected, 'run': run,
+        }
+    except (ValueError, RecursionError) as error:
+        st.error(f'Could not answer this query: {error}')
+query_feedback = st.empty()
+
+# --- 4. Reasoning trace ("tutor mode") ---
+# TODO: instrument your forward- or backward-chaining approach to record each
+# reasoning step (which rule fired, on what premises, producing what
+# conclusion) as it answers the query above.
+# TODO: render that trace as human-readable output -- e.g. a sequence of
+# st.expander(...) blocks, one per step, each with a plain-English sentence
+# -- not a raw list/dict dump.
+#
+
+result = st.session_state.get('query_result')
+if result and 'steps' not in result:
+    try:
+        with st.spinner('Recording the forward-chaining supporting proof…'):
+            query_r, query_c, query_v = result['query']
+            fc_verdict, steps = trace_fc_query(kb, atom('Is', query_r, query_c, query_v))
+            if result['verdict'] != fc_verdict:
+                raise ValueError('The two inference engines disagree; no proof is displayed.')
+            result['steps'] = steps
+    except (ValueError, RecursionError) as error:
+        st.session_state.pop('query_result', None)
+        result = None
+        st.error(f'Could not verify this query: {error}')
+if result:
+    query_r, query_c, query_v = result['query']
+    with query_feedback.container():
+        label = f"{'True' if result['verdict'] else 'False'} · Is R{query_r}C{query_c} = {query_v}?"
+        if result['verdict']:
+            st.success(label)
+            st.caption('The knowledge base entails this value. Explore its proof below.')
+        else:
+            st.info(label)
+            st.caption('This value was not proved by the knowledge base. False is not, by itself, '
+                       'a proof of the opposite. There is no successful proof to replay.')
+        st.caption(f"Backward-chaining query: {result['seconds']:.3f} s "
+                   '(includes BC indexing; excludes knowledge-base construction and FC explanation).')
+    if result['verdict']:
+        render_proof(result, n, box_h, box_w, givens)
+
+# Keep the core solver functions in sudoku_solver.py; do not duplicate them here.
