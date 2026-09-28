@@ -98,7 +98,7 @@ git switch -c member-a-kb
 streamlit run sudoku_app.py
 ```
 
-D 的在线应用：[Sudoku Logic Lab](https://it5005-sudoku-logic-lab.streamlit.app/)。支持五题选择、FC/BC 求解与计时、BC 单格查询及 FC 支持证明回放。
+D 的在线应用：[Sudoku Solver](https://it5005-sudoku-logic-lab.streamlit.app/)。支持五题选择、FC/BC 求解与计时、BC 单格查询及 FC 支持证明回放。
 
 ## 最终提交
 
