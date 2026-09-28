@@ -194,9 +194,71 @@ def pl_bc_entails(kb, query):
     -------
     bool
     """
-    raise NotImplementedError(
-        'pl_bc_entails: implement backward chaining, soundly'
-    )
+    # Index the KB once.  solve_full_grid_bc asks many queries of the same KB,
+    # so repeatedly scanning every clause at every recursive step would be
+    # unnecessarily expensive.
+    clause_count = len(kb.clauses)
+    if getattr(kb, '_bc_index_clause_count', None) != clause_count:
+        facts = set()
+        rules_by_conclusion = {}
+
+        for clause in kb.clauses:
+            premises, conclusion = parse_definite_clause(clause)
+            if premises:
+                rules_by_conclusion.setdefault(conclusion, []).append(premises)
+            else:
+                facts.add(conclusion)
+
+        kb._bc_facts = facts
+        kb._bc_rules_by_conclusion = rules_by_conclusion
+        kb._bc_proven = set(facts)
+        kb._bc_query_results = {}
+        kb._bc_index_clause_count = clause_count
+
+    # A result cached for a previous top-level query is independent of the
+    # current proof path and is therefore safe to reuse.
+    if query in kb._bc_query_results:
+        return kb._bc_query_results[query]
+
+    # A cycle may make a subgoal fail early in one traversal and become
+    # provable later after another rule establishes new facts.  Repeat the
+    # recursive search while it is still discovering facts.  The proven set
+    # only grows, so this process must reach a fixed point on the finite KB.
+    while True:
+        proven_before = len(kb._bc_proven)
+        active_goals = set()
+        failed_this_pass = set()
+
+        def prove(goal):
+            """Try to prove one goal by recursively proving rule premises."""
+            if goal in kb._bc_proven:
+                return True
+            if goal in failed_this_pass or goal in active_goals:
+                return False
+
+            active_goals.add(goal)
+            try:
+                # Premises within one rule are combined with AND.  Alternative
+                # rules with the same conclusion are combined with OR.
+                for premises in kb._bc_rules_by_conclusion.get(goal, []):
+                    if all(prove(premise) for premise in premises):
+                        kb._bc_proven.add(goal)
+                        return True
+
+                failed_this_pass.add(goal)
+                return False
+            finally:
+                active_goals.remove(goal)
+
+        if prove(query):
+            result = True
+            break
+        if len(kb._bc_proven) == proven_before:
+            result = False
+            break
+
+    kb._bc_query_results[query] = result
+    return result
 
 
 def solve_full_grid_bc(n, box_h, box_w, givens):
@@ -210,6 +272,18 @@ def solve_full_grid_bc(n, box_h, box_w, givens):
     -------
     dict[(int, int), int] -- {(row, col): value} for every cell
     """
-    raise NotImplementedError(
-        'solve_full_grid_bc: solve every cell with backward chaining'
-    )
+    kb = build_definite_kb(n, box_h, box_w, givens)
+    solved = {}
+
+    for r in range(1, n + 1):
+        for c in range(1, n + 1):
+            for v in range(1, n + 1):
+                if pl_bc_entails(kb, atom('Is', r, c, v)):
+                    solved[(r, c)] = v
+                    break
+            else:
+                raise ValueError(
+                    f'Backward chaining could not solve cell ({r}, {c})'
+                )
+
+    return solved
